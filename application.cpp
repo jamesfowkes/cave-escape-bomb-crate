@@ -12,16 +12,21 @@
 
 #include "http-get-server.hpp"
 
+#define MOVE_TIMEOUT_MS 15000UL
+
+typedef enum _state
+{
+    eState_Idle,
+    eState_Closing,
+    eState_Opening
+} eState;
+
 static HTTPGetServer s_server(NULL);
 static const raat_devices_struct * s_pDevices = NULL;
 
-static bool s_crate_is_closed = false;
+static eState s_state = eState_Idle;
 
-static unsigned long s_open_timeout = 0U;
-static void start_open_timer(void)
-{
-    s_open_timeout = millis() + 15000;
-}
+static unsigned long s_move_timeout = 0U;
 
 static void send_standard_erm_response()
 {
@@ -52,8 +57,8 @@ static void open_crate(char const * const url, char const * const end)
     {
         s_pDevices->pRelay1->set(false);
         s_pDevices->pRelay2->set(true);
-        s_crate_is_closed = false;
-        start_open_timer();
+        s_state = eState_Opening;
+        s_move_timeout = millis() + MOVE_TIMEOUT_MS;
     }
 }
 
@@ -80,8 +85,18 @@ static void close_crate(char const * const url, char const * const end)
     {
         s_pDevices->pRelay1->set(true);
         s_pDevices->pRelay2->set(false);
-        s_crate_is_closed = true;
+        s_state = eState_Closing;
+        s_move_timeout = millis() + MOVE_TIMEOUT_MS;
     }
+}
+
+static void stop_crate(char const * const url, char const * const end)
+{
+    (void)url; (void)end;
+    s_pDevices->pRelay1->set(false);
+    s_pDevices->pRelay2->set(false);
+    s_state = eState_Idle;
+    s_move_timeout = (unsigned long)-1;
 }
 
 static void unlock_drawer(char const * const url, char const * const end)
@@ -156,6 +171,7 @@ static void get_lock_state(char const * const url, char const * const end)
 
 static const char OPEN_CRATE_URL[] PROGMEM = "/crate/open";
 static const char CLOSE_CRATE_URL[] PROGMEM = "/crate/close";
+static const char STOP_CRATE_URL[] PROGMEM = "/crate/stop";
 static const char UNLOCK_DRAWER_URL[] PROGMEM = "/drawer/unlock";
 static const char LOCK_DRAWER_URL[] PROGMEM = "/drawer/lock";
 static const char SET_SPARE_URL[] PROGMEM = "/spare/set";
@@ -167,6 +183,7 @@ static http_get_handler s_handlers[] =
 {
     {OPEN_CRATE_URL, open_crate},
     {CLOSE_CRATE_URL, close_crate},
+    {STOP_CRATE_URL, stop_crate},
     {UNLOCK_DRAWER_URL, unlock_drawer},
     {LOCK_DRAWER_URL, lock_drawer},
     {SET_SPARE_URL, set_spare},
@@ -198,40 +215,57 @@ void raat_custom_loop(const raat_devices_struct& devices, const raat_params_stru
 {
     (void)params;
 
-    if (s_open_timeout > millis())
+    switch(s_state)
     {
-        return;
-    }
-
-    if (s_crate_is_closed)
-    {
+    case eState_Idle:
         if (devices.pLockSense->check_low_and_clear())
         {
             raat_logln_P(LOG_APP, PSTR("Opening crate (button)"));
             open_crate(NULL, NULL);
         }
+        break;
+    case eState_Opening:
+        if (devices.pLockSense->state() == true)
+        {
+            // Immediately stop any motion
+            stop_crate(NULL, NULL);
+        }
+        if (s_move_timeout < millis())
+        {
+            raat_logln_P(LOG_APP, PSTR("Assumed open motion stop"));
+            s_state = eState_Idle;   
+        }
+        break;
+    case eState_Closing:
+        if (devices.pLockSense->state() == true)
+        {
+            // Immediately stop any motion
+            stop_crate(NULL, NULL);
+        }
+        if (s_move_timeout < millis())
+        {
+            raat_logln_P(LOG_APP, PSTR("Assumed close motion stop"));
+            s_state = eState_Idle;   
+        }
+        break;
     }
 
     if (devices.pOverrideSense->check_low_and_clear())
     {
-        devices.pLockSense->check_low_and_clear();
-        devices.pLockSense->check_high_and_clear();
-        if (s_crate_is_closed)
+        if (devices.pLockSense->state() == false)
         {
-            raat_logln_P(LOG_APP, PSTR("Opening crate (override)"));
-            open_crate(NULL, NULL);
+            switch(s_state)
+            {
+            case eState_Idle:
+            case eState_Opening:
+                raat_logln_P(LOG_APP, PSTR("Closing crate (override)"));
+                close_crate(NULL, NULL);
+                break;
+            case eState_Closing:
+                raat_logln_P(LOG_APP, PSTR("Opening crate (override)"));
+                open_crate(NULL, NULL);
+                break;
+            }
         }
-        else
-        {
-            raat_logln_P(LOG_APP, PSTR("Closing crate (override)"));
-            close_crate(NULL, NULL);   
-        }
-    }
-
-    if (devices.pLockSense->state() == true)
-    {
-        // Immediately stop any motion
-        s_pDevices->pRelay1->set(false);
-        s_pDevices->pRelay2->set(false);
     }
 }

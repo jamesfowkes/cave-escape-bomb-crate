@@ -33,7 +33,7 @@
 
         <device name="LockSense" type="Debounced Input">
                 <setting id="pin" value="7"/>
-                <setting id="debounce_time" value="1000"/>
+                <setting id="debounce_time" value="250"/>
                 <setting id="pullup" value="true"/>
         </device>
 
@@ -48,7 +48,6 @@
                 <setting id="debounce_time" value="3000"/>
                 <setting id="pullup" value="true"/>
         </device>
-
     </devices>
 
     <modules>
